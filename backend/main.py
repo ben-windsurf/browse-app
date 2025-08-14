@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from pydantic import BaseModel
 from typing import Optional, List
 import os
+import secrets
 
 # Import database models and dependencies
 from database import User, Event, get_user_db, get_event_db, init_event_db
@@ -40,6 +41,16 @@ class EventResponse(BaseModel):
     venue: str
     image_url: Optional[str] = None
 
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+class MessageResponse(BaseModel):
+    message: str
+
 # Initialize event database if needed
 init_event_db()
 
@@ -49,7 +60,7 @@ app = FastAPI(title="StubHub Demo API", version="1.0.0")
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # React dev server
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],  # React dev server
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -73,6 +84,16 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
+
+def generate_reset_token():
+    return secrets.token_urlsafe(32)
+
+def send_reset_email(email: str, reset_token: str):
+    reset_link = f"http://localhost:3000/reset-password?token={reset_token}"
+    print(f"Password reset email for {email}:")
+    print(f"Reset link: {reset_link}")
+    print("(In production, this would be sent via email service)")
+    return True
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db = Depends(get_user_db)):
     credentials_exception = HTTPException(
@@ -144,6 +165,39 @@ async def login(user: UserLogin, db = Depends(get_user_db)):
     )
     
     return {"access_token": access_token, "token_type": "bearer"}
+
+@app.post("/auth/forgot-password", response_model=MessageResponse)
+async def forgot_password(request: ForgotPasswordRequest, db = Depends(get_user_db)):
+    user = db.query(User).filter(User.email == request.email).first()
+    if not user:
+        return {"message": "If an account with that email exists, a password reset link has been sent."}
+    
+    reset_token = generate_reset_token()
+    reset_expires = datetime.utcnow() + timedelta(hours=1)
+    
+    user.reset_token = reset_token
+    user.reset_token_expires = reset_expires
+    db.commit()
+    
+    send_reset_email(user.email, reset_token)
+    
+    return {"message": "If an account with that email exists, a password reset link has been sent."}
+
+@app.post("/auth/reset-password", response_model=MessageResponse)
+async def reset_password(request: ResetPasswordRequest, db = Depends(get_user_db)):
+    user = db.query(User).filter(User.reset_token == request.token).first()
+    if not user or not user.reset_token_expires or user.reset_token_expires < datetime.utcnow():
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired reset token"
+        )
+    
+    user.hashed_password = get_password_hash(request.new_password)
+    user.reset_token = None
+    user.reset_token_expires = None
+    db.commit()
+    
+    return {"message": "Password has been reset successfully."}
 
 @app.get("/events", response_model=List[EventResponse])
 async def get_events(db = Depends(get_event_db)):
